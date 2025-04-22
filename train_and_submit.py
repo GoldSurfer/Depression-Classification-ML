@@ -112,9 +112,12 @@ def feature_engineering(X_train, X_val, X_test):
     emotion_cols = [col for col in X_train.columns if 'emotion_' in col]
     audio_cols = [col for col in X_train.columns if 'audio_' in col]
     visual_cols = [col for col in X_train.columns if 'visual_' in col]
+    freq_cols = [col for col in X_train.columns if 'freq' in col or 'F0' in col]
+    energy_cols = [col for col in X_train.columns if 'energy' in col]
     
     # 그룹별 통계량 생성 (평균, 표준편차, 최소값, 최대값, 범위)
-    for name, cols in [('emotion', emotion_cols), ('audio', audio_cols), ('visual', visual_cols)]:
+    for name, cols in [('emotion', emotion_cols), ('audio', audio_cols), 
+                       ('visual', visual_cols), ('freq', freq_cols), ('energy', energy_cols)]:
         if cols:
             # 각 데이터셋에 대해 통계량 계산
             for df_name, df in [('train', X_train_fe), ('val', X_val_fe), ('test', X_test_fe)]:
@@ -123,12 +126,58 @@ def feature_engineering(X_train, X_val, X_test):
                 df[f'{name}_min'] = df[cols].min(axis=1)
                 df[f'{name}_max'] = df[cols].max(axis=1)
                 df[f'{name}_range'] = df[f'{name}_max'] - df[f'{name}_min']
+                df[f'{name}_median'] = df[cols].median(axis=1)
+                df[f'{name}_q25'] = df[cols].quantile(0.25, axis=1)
+                df[f'{name}_q75'] = df[cols].quantile(0.75, axis=1)
+                df[f'{name}_iqr'] = df[f'{name}_q75'] - df[f'{name}_q25']
+                df[f'{name}_skew'] = df[cols].skew(axis=1)
+                df[f'{name}_kurt'] = df[cols].kurtosis(axis=1)
     
-    # 감정과 오디오 특성 간의 상호작용 (예: 감정과 음성 톤의 관계)
-    if emotion_cols and audio_cols:
-        X_train_fe['emotion_audio_interaction'] = X_train_fe['emotion_mean'] * X_train_fe['audio_mean']
-        X_val_fe['emotion_audio_interaction'] = X_val_fe['emotion_mean'] * X_val_fe['audio_mean']
-        X_test_fe['emotion_audio_interaction'] = X_test_fe['emotion_mean'] * X_test_fe['audio_mean']
+    # 그룹 간 상호작용 특성 생성
+    group_pairs = [
+        ('emotion', 'audio'), 
+        ('emotion', 'visual'), 
+        ('audio', 'visual'),
+        ('freq', 'energy')
+    ]
+    
+    for g1, g2 in group_pairs:
+        key1 = f'{g1}_mean'
+        key2 = f'{g2}_mean'
+        
+        if key1 in X_train_fe.columns and key2 in X_train_fe.columns:
+            for df in [X_train_fe, X_val_fe, X_test_fe]:
+                # 그룹 간 곱, 비율, 차이, 합
+                df[f'{g1}_{g2}_product'] = df[key1] * df[key2]
+                df[f'{g1}_{g2}_ratio'] = df[key1] / (df[key2] + 1e-10)  # 0으로 나누기 방지
+                df[f'{g1}_{g2}_diff'] = df[key1] - df[key2]
+                df[f'{g1}_{g2}_sum'] = df[key1] + df[key2]
+                
+                # 변동성 관련 상호작용
+                if f'{g1}_std' in df.columns and f'{g2}_std' in df.columns:
+                    df[f'{g1}_{g2}_std_ratio'] = df[f'{g1}_std'] / (df[f'{g2}_std'] + 1e-10)
+                    df[f'{g1}_{g2}_variability'] = df[f'{g1}_std'] * df[f'{g2}_std']
+    
+    # 감정 특성들 간의 불일치도 (우울증은 감정 표현의 불일치로 감지될 수 있음)
+    if len(emotion_cols) > 1:
+        for df in [X_train_fe, X_val_fe, X_test_fe]:
+            # 각 감정 특성과 평균 간의 거리
+            for col in emotion_cols:
+                df[f'{col}_deviation'] = abs(df[col] - df['emotion_mean'])
+            
+            # 감정 불일치도 (감정 특성들의 표준편차 평균)
+            df['emotion_inconsistency'] = df[[f'{col}_deviation' for col in emotion_cols]].mean(axis=1)
+    
+    # 음성 특성을 활용한 톤 변화 지표 (우울증은 음성 톤의 변화가 적을 수 있음)
+    if freq_cols:
+        for df in [X_train_fe, X_val_fe, X_test_fe]:
+            if 'freq_std' in df.columns:
+                df['voice_tone_variability'] = df['freq_std'] / (df['freq_mean'] + 1e-10)
+    
+    # 생성된 특성에서 무한값이나 NaN 처리
+    for df in [X_train_fe, X_val_fe, X_test_fe]:
+        df.replace([np.inf, -np.inf], np.nan, inplace=True)
+        df.fillna(0, inplace=True)
     
     print(f"원본 특성 수: {X_train.shape[1]}")
     print(f"특성 공학 후 특성 수: {X_train_fe.shape[1]}")
@@ -176,8 +225,9 @@ def optimize_feature_selection(X_train, X_val, X_test, y_train):
     """교차 검증을 통한 특성 선택 최적화"""
     print("\n교차 검증을 통한 특성 선택 최적화 중...")
     
-    # 테스트할 다양한 임계값들
-    thresholds = ['mean', 'median', '1.25*mean', '1.25*median', '1.5*median', '0.75*mean', '0.75*median']
+    # 테스트할 다양한 임계값들 (더 많은 임계값 추가)
+    thresholds = ['mean', 'median', '1.25*mean', '1.25*median', '1.5*median', '0.75*mean', '0.75*median',
+                 '0.5*mean', '0.5*median', '2*mean', '2*median', '0.3*mean', '0.3*median']
     
     best_threshold = None
     best_score = 0
@@ -188,7 +238,7 @@ def optimize_feature_selection(X_train, X_val, X_test, y_train):
         for threshold in thresholds:
             # 특성 선택기 생성
             selector = SelectFromModel(
-                RandomForestClassifier(n_estimators=100, random_state=RANDOM_STATE),
+                RandomForestClassifier(n_estimators=200, random_state=RANDOM_STATE),  # estimators 수 증가
                 threshold=threshold
             )
             
@@ -198,11 +248,11 @@ def optimize_feature_selection(X_train, X_val, X_test, y_train):
             # 선택된 특성 수
             n_features = X_train_selected.shape[1]
             
-            # 5-겹 교차 검증으로 성능 평가
+            # 10-겹 교차 검증으로 성능 평가 (k-겹 증가)
             cv_scores = cross_val_score(
-                RandomForestClassifier(n_estimators=100, random_state=RANDOM_STATE),
+                RandomForestClassifier(n_estimators=200, random_state=RANDOM_STATE),  # estimators 수 증가
                 X_train_selected, y_train,
-                cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE),
+                cv=StratifiedKFold(n_splits=10, shuffle=True, random_state=RANDOM_STATE),  # k-겹 증가
                 scoring='accuracy',
                 n_jobs=-1
             )
@@ -224,7 +274,7 @@ def optimize_feature_selection(X_train, X_val, X_test, y_train):
     
     # 최적 임계값으로 특성 선택
     best_selector = SelectFromModel(
-        RandomForestClassifier(n_estimators=100, random_state=RANDOM_STATE),
+        RandomForestClassifier(n_estimators=200, random_state=RANDOM_STATE),  # estimators 수 증가
         threshold=best_threshold
     )
     
@@ -302,19 +352,20 @@ def train_logistic_regression(X_train, y_train, X_val, y_val):
     
     # 확장된 하이퍼파라미터 탐색 공간
     param_distributions = {
-        'C': uniform(0.001, 100),
-        'solver': ['liblinear', 'lbfgs', 'newton-cg', 'sag'],
+        'C': uniform(0.0001, 1000),  # 범위 확장
+        'solver': ['liblinear', 'lbfgs', 'newton-cg', 'sag', 'saga'],  # solver 추가
         'penalty': ['l1', 'l2', 'elasticnet', None],
-        'class_weight': [None, 'balanced'],
-        'l1_ratio': uniform(0, 1)  # elasticnet 패널티를 위한 파라미터
+        'class_weight': [None, 'balanced', {0: 0.8, 1: 1.2}, {0: 0.7, 1: 1.3}, {0: 0.9, 1: 1.1}],  # 가중치 옵션 추가
+        'l1_ratio': uniform(0, 1),  # elasticnet 패널티를 위한 파라미터
+        'max_iter': [1000, 2000, 3000]  # 최대 반복 횟수 증가
     }
     
     # RandomizedSearchCV로 더 넓은 공간을 효율적으로 탐색
     random_search = RandomizedSearchCV(
-        LogisticRegression(random_state=RANDOM_STATE, max_iter=1000),
+        LogisticRegression(random_state=RANDOM_STATE),
         param_distributions=param_distributions,
-        n_iter=20,  # 시도할 파라미터 조합 수
-        cv=StratifiedKFold(n_splits=5),
+        n_iter=50,  # 시도할 파라미터 조합 수 증가
+        cv=StratifiedKFold(n_splits=10, shuffle=True, random_state=RANDOM_STATE),  # k-겹 증가
         scoring='accuracy',
         n_jobs=-1,
         random_state=RANDOM_STATE,
@@ -343,19 +394,22 @@ def train_svm(X_train, y_train, X_val, y_val):
     
     # 확장된 하이퍼파라미터 탐색 공간
     param_distributions = {
-        'C': uniform(0.1, 100),
+        'C': uniform(0.01, 1000),  # 범위 확장
         'kernel': ['linear', 'rbf', 'poly', 'sigmoid'],
-        'gamma': ['scale', 'auto'] + list(uniform(0.001, 1).rvs(5)),
-        'degree': randint(2, 5),  # poly 커널을 위한 파라미터
-        'class_weight': [None, 'balanced']
+        'gamma': ['scale', 'auto'] + list(uniform(0.0001, 10).rvs(10)),  # 더 다양한 gamma값 시도
+        'degree': randint(2, 6),  # poly 커널을 위한 파라미터 범위 확장
+        'class_weight': [None, 'balanced', {0: 0.8, 1: 1.2}, {0: 0.7, 1: 1.3}],  # 가중치 옵션 추가
+        'coef0': uniform(0, 10).rvs(5),  # poly 및 sigmoid 커널의 독립항
+        'shrinking': [True, False],  # 수축 휴리스틱 사용 여부
+        'tol': [1e-3, 1e-4, 1e-5]  # 종료 허용 오차
     }
     
     # RandomizedSearchCV로 더 넓은 공간을 효율적으로 탐색
     random_search = RandomizedSearchCV(
         SVC(random_state=RANDOM_STATE, probability=True),
         param_distributions=param_distributions,
-        n_iter=15,  # 시도할 파라미터 조합 수
-        cv=StratifiedKFold(n_splits=5),
+        n_iter=40,  # 시도할 파라미터 조합 수 증가
+        cv=StratifiedKFold(n_splits=10, shuffle=True, random_state=RANDOM_STATE),  # k-겹 증가
         scoring='accuracy',
         n_jobs=-1,
         random_state=RANDOM_STATE,
@@ -384,21 +438,25 @@ def train_random_forest(X_train, y_train, X_val, y_val):
     
     # 확장된 하이퍼파라미터 탐색 공간
     param_distributions = {
-        'n_estimators': randint(50, 300),
-        'max_depth': [None] + list(randint(5, 30).rvs(5)),
-        'min_samples_split': randint(2, 20),
-        'min_samples_leaf': randint(1, 10),
-        'max_features': ['sqrt', 'log2', None] + [0.5, 0.7, 0.9],
+        'n_estimators': randint(100, 1000),  # 트리 수 증가
+        'max_depth': [None] + list(randint(10, 100).rvs(8)),  # 깊이 범위 확장
+        'min_samples_split': randint(2, 30),  # 범위 확장
+        'min_samples_leaf': randint(1, 20),  # 범위 확장
+        'max_features': ['sqrt', 'log2', None] + [0.3, 0.5, 0.7, 0.9],  # 옵션 추가
         'bootstrap': [True, False],
-        'class_weight': [None, 'balanced', 'balanced_subsample']
+        'class_weight': [None, 'balanced', 'balanced_subsample', 
+                        {0: 0.7, 1: 1.3}, {0: 0.8, 1: 1.2}],  # 가중치 옵션 추가
+        'criterion': ['gini', 'entropy', 'log_loss'],  # 분할 기준 추가
+        'min_impurity_decrease': [0.0, 0.01, 0.05, 0.1],  # 불순도 감소 최소값
+        'max_leaf_nodes': [None, 30, 50, 100, 200]  # 최대 리프 노드 수
     }
     
     # RandomizedSearchCV로 더 넓은 공간을 효율적으로 탐색
     random_search = RandomizedSearchCV(
         RandomForestClassifier(random_state=RANDOM_STATE),
         param_distributions=param_distributions,
-        n_iter=20,  # 시도할 파라미터 조합 수
-        cv=StratifiedKFold(n_splits=5),
+        n_iter=60,  # 시도할 파라미터 조합 수 증가
+        cv=StratifiedKFold(n_splits=10, shuffle=True, random_state=RANDOM_STATE),  # k-겹 증가
         scoring='accuracy',
         n_jobs=-1,
         random_state=RANDOM_STATE,
@@ -439,21 +497,26 @@ def train_gradient_boosting(X_train, y_train, X_val, y_val):
     
     # 확장된 하이퍼파라미터 탐색 공간
     param_distributions = {
-        'n_estimators': randint(50, 300),
-        'learning_rate': uniform(0.01, 0.3),
-        'max_depth': randint(3, 10),
-        'min_samples_split': randint(2, 20),
-        'min_samples_leaf': randint(1, 10),
-        'subsample': uniform(0.6, 0.4),
-        'max_features': ['sqrt', 'log2', None] + [0.5, 0.7, 0.9]
+        'n_estimators': randint(100, 1000),  # 트리 수 증가
+        'learning_rate': uniform(0.001, 0.5),  # 학습률 범위 확장
+        'max_depth': randint(3, 20),  # 트리 깊이 범위 확장
+        'min_samples_split': randint(2, 30),  # 범위 확장
+        'min_samples_leaf': randint(1, 20),  # 범위 확장
+        'subsample': uniform(0.5, 0.5),  # 범위 확장
+        'max_features': ['sqrt', 'log2', None] + [0.3, 0.5, 0.7, 0.9],  # 옵션 추가
+        'loss': ['log_loss', 'exponential'],  # 손실 함수 추가
+        'min_impurity_decrease': [0.0, 0.01, 0.05, 0.1],  # 불순도 감소 최소값
+        'validation_fraction': uniform(0.1, 0.3).rvs(5),  # 조기 종료를 위한 검증 데이터 비율
+        'n_iter_no_change': [5, 10, 20, None],  # 조기 종료 기준
+        'tol': [1e-5, 1e-4, 1e-3]  # 수렴 허용 오차
     }
     
     # RandomizedSearchCV로 더 넓은 공간을 효율적으로 탐색
     random_search = RandomizedSearchCV(
         GradientBoostingClassifier(random_state=RANDOM_STATE),
         param_distributions=param_distributions,
-        n_iter=20,  # 시도할 파라미터 조합 수
-        cv=StratifiedKFold(n_splits=5),
+        n_iter=60,  # 시도할 파라미터 조합 수 증가
+        cv=StratifiedKFold(n_splits=10, shuffle=True, random_state=RANDOM_STATE),  # k-겹 증가
         scoring='accuracy',
         n_jobs=-1,
         random_state=RANDOM_STATE,
@@ -513,23 +576,99 @@ def train_stacking_ensemble(models, X_train, y_train, X_val, y_val):
         ('GradientBoosting', models['GradientBoosting'])
     ]
     
-    # 메타 모델 정의
-    meta_estimator = LogisticRegression(random_state=RANDOM_STATE)
+    # 다양한 메타 모델 시도
+    meta_models = {
+        'LogisticRegression': LogisticRegression(random_state=RANDOM_STATE),
+        'RandomForest': RandomForestClassifier(n_estimators=100, random_state=RANDOM_STATE),
+        'GradientBoosting': GradientBoostingClassifier(n_estimators=100, random_state=RANDOM_STATE)
+    }
     
-    # 스태킹 앙상블 생성
-    stack_model = StackingClassifier(
+    best_meta_model = None
+    best_meta_model_name = None
+    best_cv_score = 0
+    
+    # 각 메타 모델에 대해 교차 검증 점수 계산
+    print("메타 모델 선택 중...")
+    for name, meta_model in meta_models.items():
+        # 스태킹 앙상블 생성
+        stack = StackingClassifier(
+            estimators=base_estimators,
+            final_estimator=meta_model,
+            cv=5,
+            n_jobs=-1,
+            passthrough=True  # 원본 특성도 메타 모델에 전달
+        )
+        
+        # 교차 검증 점수 계산
+        cv_scores = cross_val_score(
+            stack, X_train, y_train, 
+            cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE),
+            scoring='accuracy',
+            n_jobs=-1
+        )
+        
+        mean_cv_score = cv_scores.mean()
+        print(f"  메타 모델 {name} - 교차 검증 점수: {mean_cv_score:.4f} ± {cv_scores.std():.4f}")
+        
+        if mean_cv_score > best_cv_score:
+            best_cv_score = mean_cv_score
+            best_meta_model = meta_model
+            best_meta_model_name = name
+    
+    print(f"최적 메타 모델: {best_meta_model_name} (교차 검증 점수: {best_cv_score:.4f})")
+    
+    # 하이퍼파라미터 튜닝을 위한 파라미터 설정
+    if best_meta_model_name == 'LogisticRegression':
+        meta_param_grid = {
+            'final_estimator__C': uniform(0.1, 10),
+            'final_estimator__solver': ['liblinear', 'lbfgs'],
+            'final_estimator__class_weight': [None, 'balanced']
+        }
+    elif best_meta_model_name == 'RandomForest':
+        meta_param_grid = {
+            'final_estimator__n_estimators': randint(50, 200),
+            'final_estimator__max_depth': [None, 10, 20],
+            'final_estimator__min_samples_split': randint(2, 10)
+        }
+    else:  # GradientBoosting
+        meta_param_grid = {
+            'final_estimator__n_estimators': randint(50, 200),
+            'final_estimator__learning_rate': uniform(0.01, 0.2),
+            'final_estimator__max_depth': randint(3, 10)
+        }
+    
+    # 최종 스태킹 앙상블 모델 생성
+    final_stack = StackingClassifier(
         estimators=base_estimators,
-        final_estimator=meta_estimator,
-        cv=5,
+        final_estimator=best_meta_model,
+        cv=10,  # 증가된 k-겹 교차 검증
         n_jobs=-1,
-        passthrough=True,  # 원본 특성도 메타 모델에 전달
+        passthrough=True,
+        verbose=1
+    )
+    
+    # 하이퍼파라미터 튜닝
+    print("스태킹 앙상블 하이퍼파라미터 튜닝 중...")
+    random_search = RandomizedSearchCV(
+        final_stack,
+        param_distributions=meta_param_grid,
+        n_iter=20,
+        cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE),
+        scoring='accuracy',
+        n_jobs=-1,
+        random_state=RANDOM_STATE,
         verbose=1
     )
     
     # tqdm으로 진행 상태 표시
-    with tqdm(total=100, desc="스태킹 앙상블 훈련") as pbar:
-        stack_model.fit(X_train, y_train)
+    with tqdm(total=100, desc="최종 스태킹 앙상블 훈련") as pbar:
+        random_search.fit(X_train, y_train)
         pbar.update(100)
+    
+    print(f"최적 하이퍼파라미터: {random_search.best_params_}")
+    
+    # 최종 모델
+    stack_model = random_search.best_estimator_
     
     # 모델 저장
     joblib.dump(stack_model, 'models/stacking_ensemble.pkl')
