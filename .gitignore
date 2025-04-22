@@ -1,0 +1,33 @@
+# 제출 파일 제외
+submission.csv
+
+# macOS 시스템 파일 제외
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# 파이썬 캐시 파일 제외
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 노트북 체크포인트 제외
+.ipynb_checkpoints/
+
+# 가상환경 제외
+venv/
+env/
+ENV/
+
+# 개인 데이터 및 대용량 파일
+/data/raw/
+
+# 모델 파일 (필요시 주석 해제)
+# /models/*.pkl
+# /models/*.h5
+
+# 로그 파일
+*.log 
