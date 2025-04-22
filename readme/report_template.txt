@@ -1,0 +1,39 @@
+Machine Learning Project
+
+이 상 현
+
+2023713111
+인공지능융합학과
+
+테이블이나 그림 추가 가능합니다.
+각 섹션은 절대 변경하지 마세요. 단, 추가적인 섹션이 필요하다면 추가하셔도 됩니다.
+1.	Problem Definition
+해결하고자 하는 문제에 대한 정의
+
+2.	Data
+2.1.	Data Description
+데이터에 대한 자세한 명세(형태, 피처, 클래스의 개수 등)
+2.2.	Data Pre-processing
+데이터 전처리의 자세한 과정 설명
+
+3.	Analysis
+모델에 활용될 피처에 대한 분석
+
+4.	Model
+4.1.	Classifier
+사용된 모델 설명(알고리즘, 동작 방식 등)
+4.2.	Design Consideration
+모델 설계 시 디자인 고려사항
+
+5.	Experiments
+5.1.	Settings
+실험 설정(Train Test 비율, 파라미터 선정 방식, 학습 프로세스 등)
+5.2.	Performance Metrics
+평가 지표 설명
+5.3.	Results
+결과 및 해석
+
+6.	Discussion and Limitation
+활용방안 및 한계점
+
+7.	References
