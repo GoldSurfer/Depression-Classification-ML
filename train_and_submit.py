@@ -8,9 +8,9 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.model_selection import train_test_split, RandomizedSearchCV, StratifiedKFold
+from sklearn.model_selection import train_test_split, RandomizedSearchCV, StratifiedKFold, cross_val_score
 from sklearn.preprocessing import StandardScaler
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier, StackingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report, roc_curve, auc
@@ -172,36 +172,68 @@ def preprocess_data(train_df, test_df):
     
     return X_train_fe, X_val_fe, X_test_fe, y_train, y_val, test_ids
 
-def select_features(X_train, X_val, X_test, y_train):
-    """특성 선택"""
-    print("\n특성 선택 중...")
+def optimize_feature_selection(X_train, X_val, X_test, y_train):
+    """교차 검증을 통한 특성 선택 최적화"""
+    print("\n교차 검증을 통한 특성 선택 최적화 중...")
     
-    # 랜덤 포레스트 기반 특성 중요도를 사용한 특성 선택
-    selector = SelectFromModel(
+    # 테스트할 다양한 임계값들
+    thresholds = ['mean', 'median', '1.25*mean', '1.25*median', '1.5*median', '0.75*mean', '0.75*median']
+    
+    best_threshold = None
+    best_score = 0
+    best_n_features = 0
+    
+    # tqdm을 사용한 진행 상황 표시
+    with tqdm(total=len(thresholds), desc="특성 선택 임계값 최적화") as pbar:
+        for threshold in thresholds:
+            # 특성 선택기 생성
+            selector = SelectFromModel(
+                RandomForestClassifier(n_estimators=100, random_state=RANDOM_STATE),
+                threshold=threshold
+            )
+            
+            # 특성 선택 적용
+            X_train_selected = selector.fit_transform(X_train, y_train)
+            
+            # 선택된 특성 수
+            n_features = X_train_selected.shape[1]
+            
+            # 5-겹 교차 검증으로 성능 평가
+            cv_scores = cross_val_score(
+                RandomForestClassifier(n_estimators=100, random_state=RANDOM_STATE),
+                X_train_selected, y_train,
+                cv=StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE),
+                scoring='accuracy',
+                n_jobs=-1
+            )
+            
+            # 평균 점수 계산
+            mean_score = cv_scores.mean()
+            
+            print(f"임계값: {threshold}, 특성 수: {n_features}, 교차 검증 점수: {mean_score:.4f} ± {cv_scores.std():.4f}")
+            
+            # 최고 점수 업데이트
+            if mean_score > best_score:
+                best_score = mean_score
+                best_threshold = threshold
+                best_n_features = n_features
+            
+            pbar.update(1)
+    
+    print(f"\n최적 임계값: {best_threshold}, 특성 수: {best_n_features}, 교차 검증 점수: {best_score:.4f}")
+    
+    # 최적 임계값으로 특성 선택
+    best_selector = SelectFromModel(
         RandomForestClassifier(n_estimators=100, random_state=RANDOM_STATE),
-        threshold='median'
+        threshold=best_threshold
     )
     
-    # RFECV를 사용한 특성 선택 (계산 비용이 높아 옵션으로 남겨둠)
-    use_rfecv = False
-    if use_rfecv:
-        print("RFECV를 사용한 특성 선택 수행 중 (시간이 오래 걸릴 수 있습니다)...")
-        selector = RFECV(
-            RandomForestClassifier(n_estimators=100, random_state=RANDOM_STATE),
-            step=5, cv=StratifiedKFold(5), scoring='accuracy', n_jobs=-1,
-            min_features_to_select=X_train.shape[1] // 4
-        )
-    
-    print("특성 선택 적용 중...")
-    X_train_selected = selector.fit_transform(X_train, y_train)
-    X_val_selected = selector.transform(X_val)
-    X_test_selected = selector.transform(X_test)
-    
-    print(f"원본 특성 수: {X_train.shape[1]}")
-    print(f"선택된 특성 수: {X_train_selected.shape[1]}")
+    X_train_selected = best_selector.fit_transform(X_train, y_train)
+    X_val_selected = best_selector.transform(X_val)
+    X_test_selected = best_selector.transform(X_test)
     
     # 특성 선택 모델 저장
-    joblib.dump(selector, 'models/feature_selector.pkl')
+    joblib.dump(best_selector, 'models/optimized_feature_selector.pkl')
     
     return X_train_selected, X_val_selected, X_test_selected
 
@@ -469,6 +501,44 @@ def train_voting_ensemble(models, X_train, y_train, X_val, y_val):
     
     return ensemble, accuracy
 
+def train_stacking_ensemble(models, X_train, y_train, X_val, y_val):
+    """스태킹 앙상블 모델 훈련"""
+    print("\n스태킹 앙상블 모델 훈련 중...")
+    
+    # 베이스 모델 정의
+    base_estimators = [
+        ('LogisticRegression', models['LogisticRegression']),
+        ('SVM', models['SVM']),
+        ('RandomForest', models['RandomForest']),
+        ('GradientBoosting', models['GradientBoosting'])
+    ]
+    
+    # 메타 모델 정의
+    meta_estimator = LogisticRegression(random_state=RANDOM_STATE)
+    
+    # 스태킹 앙상블 생성
+    stack_model = StackingClassifier(
+        estimators=base_estimators,
+        final_estimator=meta_estimator,
+        cv=5,
+        n_jobs=-1,
+        passthrough=True,  # 원본 특성도 메타 모델에 전달
+        verbose=1
+    )
+    
+    # tqdm으로 진행 상태 표시
+    with tqdm(total=100, desc="스태킹 앙상블 훈련") as pbar:
+        stack_model.fit(X_train, y_train)
+        pbar.update(100)
+    
+    # 모델 저장
+    joblib.dump(stack_model, 'models/stacking_ensemble.pkl')
+    
+    # 모델 평가
+    accuracy = evaluate_model(stack_model, X_val, y_val, "StackingEnsemble")
+    
+    return stack_model, accuracy
+
 def generate_submission(best_model, X_test, test_ids, accuracy):
     """제출 파일 생성"""
     print("\n제출 파일 생성 중...")
@@ -504,8 +574,8 @@ def main():
     # 데이터 전처리 (특성 공학 포함)
     X_train, X_val, X_test, y_train, y_val, test_ids = preprocess_data(train_df, test_df)
     
-    # 특성 선택
-    X_train_selected, X_val_selected, X_test_selected = select_features(X_train, X_val, X_test, y_train)
+    # 교차 검증을 통한 특성 선택 최적화 (2순위 개선 방법)
+    X_train_selected, X_val_selected, X_test_selected = optimize_feature_selection(X_train, X_val, X_test, y_train)
     
     # 차원 축소 (선택 사항)
     use_pca = False
@@ -542,6 +612,11 @@ def main():
     
     # 앙상블 모델 (모델들의 성능이 유사할 때 효과적)
     models['VotingEnsemble'], accuracies['VotingEnsemble'] = train_voting_ensemble(
+        models, X_train_processed, y_train, X_val_processed, y_val
+    )
+    
+    # 스태킹 앙상블 모델 추가 (1순위 개선 방법)
+    models['StackingEnsemble'], accuracies['StackingEnsemble'] = train_stacking_ensemble(
         models, X_train_processed, y_train, X_val_processed, y_val
     )
     
